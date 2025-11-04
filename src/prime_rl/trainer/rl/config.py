@@ -35,6 +35,27 @@ class LossConfig(BaseModel):
             ),
         ),
     ] = 0.0
+    
+    # Contrastive loss parameters
+    contrastive_loss_weight: Annotated[
+        float, 
+        Field(ge=0, description="Weight for contrastive loss term. 0 disables contrastive loss.")
+    ] = 0.0
+    
+    contrastive_loss_type: Annotated[
+        Literal["infonce", "dpo"], 
+        Field(description="Type of contrastive loss: 'infonce' (multi-class) or 'dpo' (pairwise).")
+    ] = "infonce"
+    
+    contrastive_temperature: Annotated[
+        float, 
+        Field(gt=0, description="Temperature for contrastive loss softmax.")
+    ] = 0.1
+    
+    contrastive_beta: Annotated[
+        float, 
+        Field(gt=0, description="Beta parameter for DPO-style contrastive loss.")
+    ] = 0.1
 
 
 class FakeDataLoaderConfig(BaseConfig):

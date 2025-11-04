@@ -1,0 +1,21 @@
+max_steps = 20
+
+[model]
+name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+
+[optim]
+lr = 3e-6
+
+[loss]
+ratio_type = "sequence"
+ratio_length_norm = true
+# Enable contrastive loss
+contrastive_loss_weight = 0.1
+contrastive_loss_type = "infonce"  # or "dpo"
+contrastive_temperature = 0.1
+contrastive_beta = 0.1
+
+[wandb]
+project = "prime-rl"
+name = "reverse-text-trainer-contrastive"
+

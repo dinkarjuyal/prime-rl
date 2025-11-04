@@ -37,6 +37,127 @@ def shift_logits(logits: Float[Tensor, "batch seq vocab"]) -> Float[Tensor, "bat
     return logits
 
 
+def compute_contrastive_loss_infonce(
+    trainer_logprobs: Any,  # list of Float[Tensor, "seq_i"]
+    inference_logprobs: Any,  # list of Float[Tensor, "seq_i"]
+    advantages: Any,  # list of Float[Tensor, "seq_i"]
+    loss_mask: Any,  # list of Float[Tensor, "seq_i"]
+    temperature: float = 0.1,
+) -> Float[Tensor, ""]:
+    """
+    Compute InfoNCE-style contrastive loss with implicit hard negative mining.
+    Treats sequences with positive advantages as anchors and those with negative advantages as negatives.
+    
+    Args:
+        trainer_logprobs: List of trainer log probabilities per sequence
+        inference_logprobs: List of inference log probabilities per sequence  
+        advantages: List of advantages per sequence
+        loss_mask: List of loss masks per sequence
+        temperature: Temperature for softmax
+        
+    Returns:
+        Contrastive loss scalar
+    """
+    # Compute sequence-level log ratios (sum over tokens)
+    seq_log_ratios = []
+    seq_advantages = []
+    
+    for t_logp, i_logp, adv, mask in zip(trainer_logprobs, inference_logprobs, advantages, loss_mask):
+        # Sum log prob ratios over masked tokens
+        log_ratio = ((t_logp - i_logp) * mask).sum()
+        seq_log_ratios.append(log_ratio)
+        
+        # Average advantage over masked tokens
+        avg_adv = (adv * mask).sum() / torch.clamp_min(mask.sum(), 1)
+        seq_advantages.append(avg_adv)
+    
+    seq_log_ratios = torch.stack(seq_log_ratios)  # (num_sequences,)
+    seq_advantages = torch.stack(seq_advantages)  # (num_sequences,)
+    
+    # Separate positive (good) and negative (bad) sequences
+    positive_mask = seq_advantages > 0
+    
+    if positive_mask.sum() == 0 or (~positive_mask).sum() == 0:
+        # Need both positives and negatives for contrastive loss
+        return torch.tensor(0.0, device=seq_log_ratios.device)
+    
+    positive_log_ratios = seq_log_ratios[positive_mask]
+    negative_log_ratios = seq_log_ratios[~positive_mask]
+    
+    # InfoNCE: for each positive, contrast against all negatives
+    # Loss = -log(exp(pos/T) / (exp(pos/T) + sum(exp(neg/T))))
+    losses = []
+    for pos_lr in positive_log_ratios:
+        # Numerator: positive similarity
+        pos_sim = pos_lr / temperature
+        
+        # Denominator: positive + all negatives
+        neg_sims = negative_log_ratios / temperature
+        denominator = torch.logsumexp(torch.cat([pos_sim.unsqueeze(0), neg_sims]), dim=0)
+        
+        loss = denominator - pos_sim
+        losses.append(loss)
+    
+    return torch.stack(losses).mean()
+
+
+def compute_contrastive_loss_dpo(
+    trainer_logprobs: Any,  # list of Float[Tensor, "seq_i"]
+    inference_logprobs: Any,  # list of Float[Tensor, "seq_i"]
+    advantages: Any,  # list of Float[Tensor, "seq_i"]
+    loss_mask: Any,  # list of Float[Tensor, "seq_i"]
+    beta: float = 0.1,
+) -> Float[Tensor, ""]:
+    """
+    Compute DPO-style pairwise contrastive loss with implicit hard negative mining.
+    
+    Args:
+        trainer_logprobs: List of trainer log probabilities per sequence
+        inference_logprobs: List of inference log probabilities per sequence
+        advantages: List of advantages per sequence
+        loss_mask: List of loss masks per sequence
+        beta: Beta parameter for DPO loss
+        
+    Returns:
+        Contrastive loss scalar
+    """
+    # Compute sequence-level log ratios
+    seq_log_ratios = []
+    seq_advantages = []
+    
+    for t_logp, i_logp, adv, mask in zip(trainer_logprobs, inference_logprobs, advantages, loss_mask):
+        log_ratio = ((t_logp - i_logp) * mask).sum()
+        seq_log_ratios.append(log_ratio)
+        
+        avg_adv = (adv * mask).sum() / torch.clamp_min(mask.sum(), 1)
+        seq_advantages.append(avg_adv)
+    
+    seq_log_ratios = torch.stack(seq_log_ratios)
+    seq_advantages = torch.stack(seq_advantages)
+    
+    # Separate positive and negative sequences
+    positive_mask = seq_advantages > 0
+    
+    if positive_mask.sum() == 0 or (~positive_mask).sum() == 0:
+        return torch.tensor(0.0, device=seq_log_ratios.device)
+    
+    positive_log_ratios = seq_log_ratios[positive_mask]
+    negative_log_ratios = seq_log_ratios[~positive_mask]
+    
+    # DPO: for each positive, pair with hardest negative
+    # Loss = -log(sigmoid(beta * (log_ratio_pos - log_ratio_neg)))
+    losses = []
+    for pos_lr in positive_log_ratios:
+        # Find hardest negative (highest log ratio among negatives)
+        hardest_neg_lr = negative_log_ratios.max()
+        
+        # DPO loss
+        loss = -torch.nn.functional.logsigmoid(beta * (pos_lr - hardest_neg_lr))
+        losses.append(loss)
+    
+    return torch.stack(losses).mean()
+
+
 def compute_loss(
     trainer_logprobs: Any,  # list of Float[Tensor, "seq_i"] with potentially different seq_i lengths
     inference_logprobs: Any,  # list of Float[Tensor, "seq_i"] with potentially different seq_i lengths
@@ -118,6 +239,22 @@ def compute_loss(
     # Apply loss scaling
     scaled_loss = total_loss / loss_scale
 
+    # Add contrastive loss if enabled
+    contrastive_loss = torch.tensor(0.0, device=scaled_loss.device)
+    if loss_config.contrastive_loss_weight > 0:
+        if loss_config.contrastive_loss_type == "infonce":
+            contrastive_loss = compute_contrastive_loss_infonce(
+                trainer_logprobs, inference_logprobs, advantages, loss_mask,
+                temperature=loss_config.contrastive_temperature
+            )
+        elif loss_config.contrastive_loss_type == "dpo":
+            contrastive_loss = compute_contrastive_loss_dpo(
+                trainer_logprobs, inference_logprobs, advantages, loss_mask,
+                beta=loss_config.contrastive_beta
+            )
+        
+        scaled_loss = scaled_loss + loss_config.contrastive_loss_weight * contrastive_loss
+
     return scaled_loss, {
         "mismatch_kl": torch.stack(total_mismatch_kl),
         "masked_mismatch_kl": torch.stack(total_masked_mismatch_kl),
@@ -126,4 +263,5 @@ def compute_loss(
         "is_masked_low": torch.cat(total_is_masked_low),
         "is_masked_high": torch.cat(total_is_masked_high),
         "sequence_masked_low": torch.stack(total_sequence_masked_low),
+        "contrastive_loss": contrastive_loss.unsqueeze(0),  # Log contrastive loss
     }

@@ -5,3 +5,7 @@ name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 
 [optim]
 lr = 3e-6
+
+[wandb]
+project = "prime-rl"
+name = "reverse-text-trainer"
