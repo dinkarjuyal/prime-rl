@@ -42,6 +42,11 @@ class LossConfig(BaseModel):
         Field(ge=0, description="Weight for contrastive loss term. 0 disables contrastive loss.")
     ] = 0.0
     
+    contrastive_loss_weight_end: Annotated[
+        float | None, 
+        Field(ge=0, description="Final weight for contrastive loss. If set, linearly interpolates from contrastive_loss_weight to this value.")
+    ] = None
+    
     contrastive_loss_type: Annotated[
         Literal["infonce", "dpo"], 
         Field(description="Type of contrastive loss: 'infonce' (multi-class) or 'dpo' (pairwise).")

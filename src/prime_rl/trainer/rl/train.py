@@ -245,6 +245,8 @@ def train(config: RLTrainerConfig):
                 loss_mask=loss_mask.squeeze().split(response_lengths),
                 loss_config=config.loss,
                 loss_scale=loss_scale,
+                current_step=progress.step,
+                max_steps=config.max_steps,
             )
 
             # Compute entropy

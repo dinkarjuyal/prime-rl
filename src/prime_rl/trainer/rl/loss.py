@@ -165,6 +165,8 @@ def compute_loss(
     loss_mask: Any,  # list of Bool[Tensor, "seq_i"] with potentially different seq_i lengths
     loss_config: LossConfig,
     loss_scale: int,
+    current_step: int = 0,
+    max_steps: int | None = None,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
     """
     Compute loss for packed sequences (batch size = 1, multiple sequences packed along sequence dimension).
@@ -241,7 +243,17 @@ def compute_loss(
 
     # Add contrastive loss if enabled
     contrastive_loss = torch.tensor(0.0, device=scaled_loss.device)
-    if loss_config.contrastive_loss_weight > 0:
+    contrastive_weight = loss_config.contrastive_loss_weight
+    
+    # Apply linear schedule if configured
+    if loss_config.contrastive_loss_weight_end is not None and max_steps is not None and max_steps > 0:
+        progress = min(current_step / max_steps, 1.0)
+        contrastive_weight = (
+            loss_config.contrastive_loss_weight * (1 - progress) + 
+            loss_config.contrastive_loss_weight_end * progress
+        )
+    
+    if contrastive_weight > 0:
         if loss_config.contrastive_loss_type == "infonce":
             contrastive_loss = compute_contrastive_loss_infonce(
                 trainer_logprobs, inference_logprobs, advantages, loss_mask,
@@ -253,7 +265,7 @@ def compute_loss(
                 beta=loss_config.contrastive_beta
             )
         
-        scaled_loss = scaled_loss + loss_config.contrastive_loss_weight * contrastive_loss
+        scaled_loss = scaled_loss + contrastive_weight * contrastive_loss
 
     return scaled_loss, {
         "mismatch_kl": torch.stack(total_mismatch_kl),
@@ -264,4 +276,5 @@ def compute_loss(
         "is_masked_high": torch.cat(total_is_masked_high),
         "sequence_masked_low": torch.stack(total_sequence_masked_low),
         "contrastive_loss": contrastive_loss.unsqueeze(0),  # Log contrastive loss
+        "contrastive_weight": torch.tensor([contrastive_weight], device=scaled_loss.device),  # Log scheduled weight
     }
