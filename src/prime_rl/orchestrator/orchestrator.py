@@ -3,13 +3,19 @@ import asyncio
 import time
 from loguru import logger
 
+from prime_rl.orchestrator.patches import monkey_patch_oai_iterable_types, monkey_patch_chat_completion_logprobs
+
+# This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
+monkey_patch_oai_iterable_types()
+
+
+# This monkey patch is necessary to avoid heavy CPU overhead from constructing the OAI ChatCompletion Pydantic model with logprobs, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1189
+monkey_patch_chat_completion_logprobs()
+
 # Import environment before any other imports
 # ruff: noqa: I001,F401
 from prime_rl.orchestrator import envs
-from prime_rl.orchestrator.utils import get_train_sampling_args, monkey_patch_chat_completion_logprobs
-
-# This monkey patch is necessary to avoid heavy CPU overhead from constructing the OAI ChatCompletion Pydantic model with logprobs
-monkey_patch_chat_completion_logprobs()
+from prime_rl.orchestrator.utils import get_train_sampling_args
 
 import lovely_tensors as lt
 import torch
@@ -37,7 +43,6 @@ from prime_rl.orchestrator.batch import prepare_batch
 from prime_rl.utils.logger import setup_logger
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.utils import (
-    monkey_patch_chat_completion_logprobs,
     print_benchmark,
     parse_is_truncated_completions,
 )
@@ -100,9 +105,16 @@ async def orchestrate(config: OrchestratorConfig):
     env = vf.EnvGroup(
         envs=[vf.load_environment(env.id, **env.args) for env in config.env],
         env_names=[env.name or env.id for env in config.env],
+        map_kwargs=dict(writer_batch_size=1),  # Set defensively to not error on map operations on large datasets
+        env_mix_strategy=config.env_mix.strategy,
+        env_mix_kwargs=dict(
+            probabilities=config.env_mix.probabilities,
+            stopping_strategy=config.env_mix.stopping_strategy,
+            seed=config.env_mix.seed,
+        ),
     )
     dataset = env.get_dataset(seed=config.seed)
-    val_dataset = env.get_eval_dataset(config.val.num_examples, seed=config.seed) if config.val else None
+    val_dataset = env.get_eval_dataset(seed=config.seed) if config.val else None
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
@@ -116,13 +128,11 @@ async def orchestrate(config: OrchestratorConfig):
     logger.success("Inference pool ready")
 
     # Set up weight broadcast backend
+    logger.info(f"Initializing weight broadcast ({config.weight_broadcast})")
     if config.weight_broadcast.type == "nccl":
-        logger.info(f"Initializing NCCL broadcast ({config.weight_broadcast})")
         await init_nccl_broadcast(
             admin_clients, config.weight_broadcast.host, config.weight_broadcast.port, config.weight_broadcast.timeout
         )
-    else:
-        logger.info("Using filesystem for broadcasting weights into the inference pool.")
 
     # Get checkpoint manager
     logger.info(f"Initializing checkpoint manager ({config.ckpt})")
@@ -401,17 +411,17 @@ async def orchestrate(config: OrchestratorConfig):
             "progress/ckpt_step": ckpt_step,  # Shared W&B axis
             # Sequence length metrics
             "seq_len/mean": results_df.groupby("example_id").seq_len.mean().mean(),
-            "seq_len/max": results_df.groupby("example_id").seq_len.max().mean(),
-            "seq_len/min": results_df.groupby("example_id").seq_len.min().mean(),
+            "seq_len/max": results_df.groupby("example_id").seq_len.mean().max(),
+            "seq_len/min": results_df.groupby("example_id").seq_len.mean().min(),
             "prompt_len/mean": results_df.groupby("example_id").prompt_len.mean().mean(),
-            "prompt_len/max": results_df.groupby("example_id").prompt_len.max().mean(),
-            "prompt_len/min": results_df.groupby("example_id").prompt_len.min().mean(),
+            "prompt_len/max": results_df.groupby("example_id").prompt_len.mean().max(),
+            "prompt_len/min": results_df.groupby("example_id").prompt_len.mean().min(),
             "completion_len/mean": results_df.groupby("example_id").completion_len.mean().mean(),
-            "completion_len/max": results_df.groupby("example_id").completion_len.max().mean(),
-            "completion_len/min": results_df.groupby("example_id").completion_len.min().mean(),
+            "completion_len/max": results_df.groupby("example_id").completion_len.mean().max(),
+            "completion_len/min": results_df.groupby("example_id").completion_len.mean().min(),
             "is_truncated/mean": results_df.groupby("example_id").is_truncated.mean().mean(),
-            "is_truncated/max": results_df.groupby("example_id").is_truncated.max().mean(),
-            "is_truncated/min": results_df.groupby("example_id").is_truncated.min().mean(),
+            "is_truncated/max": results_df.groupby("example_id").is_truncated.mean().max(),
+            "is_truncated/min": results_df.groupby("example_id").is_truncated.mean().min(),
             # Performance metrics
             "perf/throughput": throughput,
             "perf/problem_requests": problem_requests,
